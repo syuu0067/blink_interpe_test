@@ -1,3 +1,5 @@
+install.packages("patchwork")
+install.packages("tidyverse")
 library(eyelinkReader)
 library(tidyverse)
 library(patchwork)

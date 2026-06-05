@@ -34,54 +34,6 @@ view_dist_cm <- 50
 res_x <- 1920
 res_y <- 1080
 
-# ---- physical screen size ----
-inch_to_cm <- 2.54
-diag_cm <- diag_inch * inch_to_cm
-
-screen_w_cm <- diag_cm * aspect_w / sqrt(aspect_w^2 + aspect_h^2)
-screen_h_cm <- diag_cm * aspect_h / sqrt(aspect_w^2 + aspect_h^2)
-
-screen_w_cm
-screen_h_cm
-
-px_to_deg <- function(px, screen_cm, screen_px, view_dist_cm) {
-  L_cm <- px * screen_cm / screen_px
-  deg <- 2 * atan((L_cm / 2) / view_dist_cm) * 180 / pi
-  return(deg)
-}
-
-deg_per_px_x <- px_to_deg(1, screen_w_cm, res_x, view_dist_cm)
-deg_per_px_y <- px_to_deg(1, screen_h_cm, res_y, view_dist_cm)
-
-deg_per_px_x
-deg_per_px_y
-
-pix_to_deg_position <- function(x_px, y_px,
-                                screen_w_cm, screen_h_cm,
-                                res_x, res_y,
-                                view_dist_cm) {
-  x_centered <- x_px - res_x / 2
-  y_centered <- y_px - res_y / 2
-  
-  x_cm <- x_centered * screen_w_cm / res_x
-  y_cm <- y_centered * screen_h_cm / res_y
-  
-  x_deg <- atan(x_cm / view_dist_cm) * 180 / pi
-  y_deg <- atan(y_cm / view_dist_cm) * 180 / pi
-  
-  data.frame(x_deg = x_deg, y_deg = y_deg)
-}
-
-deg_pos <- pix_to_deg_position(
-  x_px = samples$x,
-  y_px = samples$y,
-  screen_w_cm = screen_w_cm,
-  screen_h_cm = screen_h_cm,
-  res_x = res_x,
-  res_y = res_y,
-  view_dist_cm = view_dist_cm
-)
-
 samples <- samples %>%
   bind_cols(deg_pos)
 

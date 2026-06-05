@@ -59,7 +59,7 @@ detect_microsaccades <- function(x, y, sr = SR, lambda = LAMBDA, min_dur = MIN_D
                amplitude_deg = amp,
                peak_vel = pv)
   })
-
+# 
   do.call(rbind, Filter(Negate(is.null), result))
 }
 
