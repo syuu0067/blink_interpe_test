@@ -1,0 +1,13 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.positai
+*.RData 
+*.Rhistory 
+*.asc 
+*.edf 
+*.RData 
+*.Rhistory 
+*.Rdata 
+*.RData 
