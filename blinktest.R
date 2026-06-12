@@ -8,6 +8,7 @@ blink_raw <- read_edf(
 
 library(dplyr)
 library(zoo)
+library(dplyr)
 
 samples <- blink_raw$samples %>%
   select(
@@ -20,10 +21,11 @@ samples <- blink_raw$samples %>%
     pupil = paR
   )
 
+sr=250
 screen_center_x <- 1920 / 2  
 screen_center_y <- 1080 / 2  
-analysis_check$x <- analysis_check$x - screen_center_x
-analysis_check$y <- analysis_check$y - screen_center_y
+samples$x <- samples$x - screen_center_x
+samples$y <- samples$y - screen_center_y
 
 # ---- monitor settings ----
 diag_inch <- 23
@@ -34,15 +36,18 @@ view_dist_cm <- 50
 res_x <- 1920
 res_y <- 1080
 
-samples <- samples %>%
-  bind_cols(deg_pos)
+
 
 samples_interp <- samples %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
   mutate(
+    is_zero_gaze = is.na(x),
     is_zero_pupil = !is.na(pupil) & pupil == 0,
     
+    na_group = cumsum(
+      is_zero_gaze != lag(is_zero_gaze, default = first(is_zero_gaze))
+    ),
     zero_group = cumsum(
       is_zero_pupil != lag(is_zero_pupil, default = first(is_zero_pupil))
     )
@@ -96,14 +101,34 @@ samples_interp_final <- samples_na %>%
       na.rm = FALSE
     )
   ) %>%
+  mutate(
+    gaze_x = na.approx(
+      x,
+      x = time_rel,
+      na.rm = FALSE
+    )
+  ) %>%
+  mutate(
+    gaze_y = na.approx(
+      y,
+      x = time_rel,
+      na.rm = FALSE
+    )
+  ) %>%
   ungroup()
 
+samples_interp_final <- samples_interp_final%>%
+filter(!is.na(pupil_interp)) 
+
 analysis_data <- samples_interp_final %>%
-  filter(!is.na(pupil_interp))
-
-
-x <- diff(analysis_data$pupil_interp)
-pupil_velocity_average = mean(x)
+  arrange(trial, time_rel) %>%
+  group_by(trial) %>%
+  mutate(
+    pupil_diff = pupil_interp - lag(pupil_interp)
+  ) %>%
+  ungroup()
+  
+pupil_velocity_average = mean(analysis_data$pupil_diff,na.rm=TRUE)
 
 SD = sd(x,na.rm = TRUE)
 σ = 1.5
@@ -112,9 +137,10 @@ low_threshold = pupil_velocity_average - SD*σ
 high_threshold = pupil_velocity_average + SD*σ
 
 
-raw_artifacts <- which(x<low_threshold | x>high_threshold)
+raw_artifacts <- which(analysis_data$pupil_diff<low_threshold | analysis_data$pupil_diff>high_threshold)
 a <- diff(raw_artifacts)
-artifacts_point <- sort(unique(c(raw_artifacts,raw_artifacts+1)))
+artifacts_point <- sort(unique(c(raw_artifacts,raw_artifacts)))
+
 
 artifacts=artifacts_point
 for (i in length(a):1) {
@@ -123,6 +149,7 @@ for (i in length(a):1) {
       artifacts <- append(artifacts,raw_artifacts[i]+d,after = i)
     }
 }
+
 artifacts <- sort(unique(artifacts))
 
 analysis_artifact_interp <- analysis_data %>%
@@ -146,7 +173,7 @@ analysis_artifact_interp <- analysis_data %>%
   ungroup()
 
 
-analysis_check <- analysis_data %>%
+analysis_check <- analysis_artifact_interp %>%
   mutate(
     artifact_velocity = row_number() %in% artifacts
   )
@@ -155,30 +182,11 @@ blink_times <- analysis_check %>%
   filter(blink_window) %>%
   pull(time_rel)
 
-analysis_check <- analysis_check %>%
-  mutate(
-    within_50ms_from_blink = sapply(
-      time_rel,
-      function(t) any(abs(t - blink_times) <= 50)
-    ),
-    
-    blink_related_artifact = blink_window |
-      (artifact_velocity & within_50ms_from_blink),
-    
-    pupil_restored = if_else(
-      blink_related_artifact,
-      pupil,
-      pupil_interp
-    )
-  )
 
 gaze_velocity <- function(x, sampling_rate) {
-  x <- analysis_check$x_deg
-  dt <- 1 / 250
+  dt <- 1 / sampling_rate
   n <- length(x)
   v <- rep(NA_real_, n)
-  
-  if (n < 5) return(v)
   
   for (i in 3:(n - 2)) {
     v[i] <- (x[i + 2] + x[i + 1] - x[i - 1] - x[i - 2]) / (6 * dt)
@@ -187,17 +195,47 @@ gaze_velocity <- function(x, sampling_rate) {
   v
 }
 
-interped_gaze <- function(v) {
+median_based_sd <- function(v) {
   v <- v[is.finite(v)]
-  sqrt(median(v^2) - median(v)^2)
+  sqrt(median((v - median(v))^2))
 }
 
-detect_candidates <- function(x, y, sampling_rate = 250, lambda = 5) {
-  vx <- gaze_velocity(x, sampling_rate)
-  vy <- gaze_velocity(y, sampling_rate)
+analysis_check <- analysis_check %>%
+arrange(trial, time_rel) %>%
+group_by(trial) %>%
+  mutate(
+vx <- gaze_velocity(analysis_check$gaze_x,sr),
+vy <- gaze_velocity(analysis_check$gaze_y,sr)
+)
+ungroup()
+
+gaze_interp <- function(v,x,samplig_rate){
+  dt <- 1/samplig_rate
+  v2 <- v
+  v2 <- v2[-c(1, 2, length(v2), (length(v2)-1))]
+  x0 <- x[2]
+  v3 = 0
+  result <- c()
+
+  for (i in 1:length(v2)) {
+    v3<- v3+v2[i]
+    result <- c(result,v3*dt+x0)
+  }
+  x_rec <- c(x[1],x[2],result,x[(length(x)-1)],x[length(x)])
+  x_rec
+}
+
+vxn <- gaze_interp(vx,analysis_check$gaze_x,sr)
+vyn <- gaze_interp(vy,analysis_check$gaze_y,sr)
+
+analysis_check$xv <- vxn
+analysis_check$yv <- vyn
+
+detect_candidates <- function(x, y, sampling_rate = 250, lambda = 5, min_samples = 3) {
+
   
-  sigma_x <- interped_gaze(vx)
-  sigma_y <- interped_gaze(vy)
+  sigma_x <- median_based_sd(vx)
+  sigma_y <- median_based_sd(vy)
   
   eta_x <- lambda * sigma_x
   eta_y <- lambda * sigma_y
@@ -205,48 +243,100 @@ detect_candidates <- function(x, y, sampling_rate = 250, lambda = 5) {
   cand <- (vx / eta_x)^2 + (vy / eta_y)^2 > 1
   cand[is.na(cand)] <- FALSE
   
-  saccade_like_raw <- (vx / eta_x)^2 + (vy / eta_y)^2 > 1
+  starts <- which(diff(c(FALSE, cand)) == 1)
+  ends   <- which(diff(c(cand, FALSE)) == -1)
   
-  analysis_check$saccade_like_raw <- c(FALSE, saccade_like_raw)
-  list(
-    candidate = cand,
-    vx = vx,
-    vy = vy,
-    eta_x = eta_x,
-    eta_y = eta_y
+  result <- lapply(seq_along(starts), function(k) {
+    s <- starts[k]
+    e <- ends[k]
+    
+    if ((e - s + 1) < min_samples) return(NULL)
+    
+    amp <- sqrt((x[e] - x[s])^2 + (y[e] - y[s])^2)
+    pv  <- max(sqrt(vx[s:e]^2 + vy[s:e]^2), na.rm = TRUE)
+    
+    data.frame(
+      onset = s,
+      offset = e,
+      duration_samples = e - s + 1,
+      duration_ms = (e - s + 1) * (1000 / sampling_rate),
+      amplitude = amp,
+      peak_vel = pv
+    )
+  })
+  
+  events <- do.call(rbind, Filter(Negate(is.null), result))
+  
+}
+events <- detect_candidates(analysis_check$xv, analysis_check$yv)
+
+
+second_dat <- analysis_check
+second_dat <- second_dat |>
+  mutate(
+   pupil_second  = if_else(blink_window, pupil, pupil_interp2)
   )
+
+second_dat$pupil_for_interp_second <- second_dat$pupil_second
+
+for (i in 1:nrow(events)) {
+  
+  idx <- events$onset[i]:events$offset[i]
+  
+  second_dat$pupil_for_interp_second[idx] <- NA
 }
 
-
-
-
-analysis_check <- analysis_check %>%
+final_dat <- second_dat %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
   mutate(
-    saccade_group = cumsum(
-      saccade_like_raw != lag(saccade_like_raw, default = first(saccade_like_raw))
+    Pupil_final = na.approx(
+       pupil_for_interp_second,
+      x = time_rel,
+      na.rm = FALSE
     )
-  ) %>%
-  group_by(trial, saccade_group) %>%
-  mutate(
-    saccade_like = saccade_like_raw & n() >= 2
   ) %>%
   ungroup()
 
-imrl<- analysis_check[analysis_check$artifact_velocity==TRUE,]
-
-blink_temp<- analysis_check[analysis_check$blink_window==TRUE,]
-saccade_temp<- blink_temp[blink_temp$saccade_like==TRUE,]
-saccade_temp2<-analysis_check[analysis_check$saccade_like==TRUE,]
-plot(analysis_check$x,analysis_check$y)
 
 
-plot(analysis_check$x_deg, analysis_check$y_deg, col = ifelse(!is.na(analysis_check$blink_window) & analysis_check$blink_window, ifelse(analysis_check$saccade_like,"green","red"), ifelse(!is.na(analysis_check$saccade_like)& analysis_check$saccade_like ,"blue","black")))
+library(ggplot2)
+library(tidyverse)
+library(patchwork)
 
+dat<-second_dat
 
-t <- seq(0, 2 * pi, length = 200)
-ellipse_x <- threshold_x * cos(t)
-ellipse_y <- threshold_y * sin(t)
-lines(ellipse_x, ellipse_y, col = "blue", lwd = 2, lty = 2)
+gorgx<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=xv), color='red')
+gorgx<-gorgx+ylim(-(blink_raw$display_coords[3]/2), (blink_raw$display_coords[3]/2))
+gorgy<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=yv), color='blue')
+gorgy<-gorgy+ylim(-(blink_raw$display_coords[4]/2), (blink_raw$display_coords[4]/2))
+gppl<-ggplot(data=dat)+geom_line(aes(x=time_rel, y=pupil_interp2), color='green')
+
+gorgx / gorgy / gppl
+
+tmpwid<-100
+tblink<-1
+prd<-(blink_raw$blinks$sttime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)-tmpwid):(blink_raw$blinks$entime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)+tmpwid)
+plot(prd,dat$pupil_second[prd])
+
+onsets<-events$onset*(1000/sr)
+offsets<-events$offset*(1000/sr)
+outdir <- "plot_dat"
+for (i in 1:nrow(events)){
+  nms<-i
+  prd1<-(events$onset[nms]-tmpwid):(events$offset[nms]+tmpwid)
+  prd2<-(events$onset[nms]):(events$offset[nms])
+  xx<-c(events$onset[nms]-tmpwid, events$offset[nms]+tmpwid)
+  yy<-c(min(dat$pupil_second[prd1],na.rm = T), max(dat$pupil_second[prd1],na.rm=T))
+  png(
+    filename = file.path(outdir, paste0("microsaccade_", i, ".png")),
+    width = 800,
+    height = 600
+  )
+  plot(prd1, dat$pupil_second[prd1], xlim=xx, ylim=yy)
+  par (new =T)
+  plot(prd2, dat$pupil_second[prd2], col='red', xlim=xx, ylim=yy)
+  res[nms,]
+  dev.off()
+}
 
