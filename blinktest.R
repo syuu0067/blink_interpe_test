@@ -4,7 +4,9 @@ library(eyelinkReader)
 
 blink_raw <- read_edf(
   "mwtest2.edf",
-  import_samples = TRUE
+  import_samples = TRUE,
+  start_marker = "REFOCUS",
+  end_marker = "MW_REPORT"
 )
 
 library(dplyr)
@@ -17,9 +19,9 @@ samples <- blink_raw$samples %>%
     eye,
     time,
     time_rel,
-    x = gxL,
-    y = gyL,
-    pupil = paL
+    x = gxR,
+    y = gyR,
+    pupil = paR
   )
 
 sr=250
