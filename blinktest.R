@@ -1,8 +1,9 @@
+rm(list=ls())
 Sys.setenv(EDFAPI = "C:/Program Files (x86)/SR Research/EyeLink/EDF_Access_API")
 library(eyelinkReader)
 
 blink_raw <- read_edf(
-  "blinktest.edf",
+  "mwtest2.edf",
   import_samples = TRUE
 )
 
@@ -16,9 +17,9 @@ samples <- blink_raw$samples %>%
     eye,
     time,
     time_rel,
-    x = gxR,
-    y = gyR,
-    pupil = paR
+    x = gxL,
+    y = gyL,
+    pupil = paL
   )
 
 sr=250
@@ -130,7 +131,7 @@ analysis_data <- samples_interp_final %>%
   
 pupil_velocity_average = mean(analysis_data$pupil_diff,na.rm=TRUE)
 
-SD = sd(x,na.rm = TRUE)
+SD = sd(analysis_data$pupil_diff,na.rm = TRUE)
 σ = 1.5
 
 low_threshold = pupil_velocity_average - SD*σ
@@ -204,9 +205,9 @@ analysis_check <- analysis_check %>%
 arrange(trial, time_rel) %>%
 group_by(trial) %>%
   mutate(
-vx <- gaze_velocity(analysis_check$gaze_x,sr),
-vy <- gaze_velocity(analysis_check$gaze_y,sr)
-)
+vx = gaze_velocity(gaze_x,sr),
+vy = gaze_velocity(gaze_y,sr)
+)%>%
 ungroup()
 
 gaze_interp <- function(v,x,samplig_rate){
@@ -225,14 +226,11 @@ gaze_interp <- function(v,x,samplig_rate){
   x_rec
 }
 
-vxn <- gaze_interp(vx,analysis_check$gaze_x,sr)
-vyn <- gaze_interp(vy,analysis_check$gaze_y,sr)
-
-analysis_check$xv <- vxn
-analysis_check$yv <- vyn
 
 detect_candidates <- function(x, y, sampling_rate = 250, lambda = 5, min_samples = 3) {
 
+  vx <- gaze_velocity(x,sr)
+  vy <- gaze_velocity(y,sr)
   
   sigma_x <- median_based_sd(vx)
   sigma_y <- median_based_sd(vy)
@@ -268,23 +266,44 @@ detect_candidates <- function(x, y, sampling_rate = 250, lambda = 5, min_samples
   events <- do.call(rbind, Filter(Negate(is.null), result))
   
 }
-events <- detect_candidates(analysis_check$xv, analysis_check$yv)
+events <- analysis_check %>%
+  arrange(trial, time_rel) %>%
+  group_by(trial) %>%
+  group_modify(~ {
+    ev <- detect_candidates(
+      x = .x$gaze_x,
+      y = .x$gaze_y,
+      sampling_rate = sr
+    )
+    
+    if (is.null(ev)) return(tibble())
+    
+    ev
+      
+  }) %>%
+  ungroup()
 
 
-second_dat <- analysis_check
-second_dat <- second_dat |>
+second_dat <- analysis_check %>%
+  group_by(trial) %>%
   mutate(
-   pupil_second  = if_else(blink_window, pupil, pupil_interp2)
-  )
-
-second_dat$pupil_for_interp_second <- second_dat$pupil_second
-
-for (i in 1:nrow(events)) {
-  
-  idx <- events$onset[i]:events$offset[i]
-  
-  second_dat$pupil_for_interp_second[idx] <- NA
-}
+    pupil_for_interp_second = pupil_interp2
+  ) %>%
+  group_modify(~ {
+    s <- .x
+    ev <- events %>% filter(trial == .y$trial)
+    
+    if (nrow(ev) > 0) {
+      for (i in 1:nrow(ev)) {
+        start <- max(1, ev$onset[i])
+        end <- min(nrow(s), ev$offset[i])
+        s$pupil_for_interp_second[start:end] <- NA
+      }
+    }
+    
+    s
+  }) %>%
+  ungroup()
 
 final_dat <- second_dat %>%
   arrange(trial, time_rel) %>%
