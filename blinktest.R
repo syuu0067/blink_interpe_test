@@ -1,20 +1,20 @@
 rm(list=ls())
+#APIキーの指定
 Sys.setenv(EDFAPI = "C:/Program Files (x86)/SR Research/EyeLink/EDF_Access_API")
+#必要パッケージの参照
 library(eyelinkReader)
-
+library(dplyr)
+library(zoo)
+#データの読み込み
 blink_raw <- read_edf(
-  "mwtest2.edf",
+  "ariemw.edf",
   import_samples = TRUE,
   start_marker = "REFOCUS",
   end_marker = "MW_REPORT"
 )
-
-library(dplyr)
-library(zoo)
-library(dplyr)
-
+#必要データのみの抜粋
 samples <- blink_raw$samples %>%
-  select(
+  dplyr::select(
     trial,
     eye,
     time,
@@ -22,25 +22,20 @@ samples <- blink_raw$samples %>%
     x = gxR,
     y = gyR,
     pupil = paR
-  )
-
+  ) %>%
+  dplyr::mutate(
+    trial = as.integer(trial)
+  ) %>%
+  dplyr::filter(trial %% 2 == 1)
+#サンプリングレート及び、画面サイズ
 sr=250
 screen_center_x <- 1920 / 2  
 screen_center_y <- 1080 / 2  
 samples$x <- samples$x - screen_center_x
 samples$y <- samples$y - screen_center_y
 
-# ---- monitor settings ----
-diag_inch <- 23
-aspect_w <- 16
-aspect_h <- 9
-view_dist_cm <- 50
 
-res_x <- 1920
-res_y <- 1080
-
-
-
+#0とNA（瞬目）を判別し、0かNAのまとまりが来るたびにグループ番号が増えるようにする
 samples_interp <- samples %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
@@ -56,7 +51,7 @@ samples_interp <- samples %>%
     )
   ) %>%
   ungroup()
-
+#瞬目の開始時間と終了時間を取り出し、保守的な検出の時間を定義
 zero_segments <- samples_interp %>%
   filter(is_zero_pupil) %>%
   group_by(trial, zero_group) %>%
@@ -69,7 +64,7 @@ zero_segments <- samples_interp %>%
     bad_start = zero_start - 100,
     bad_end = zero_end + 300
   )
-
+#先ほどの時間を使って保守的な瞬目機関の判定列を作る
 samples_flagged <- samples_interp %>%
   group_by(trial) %>%
   group_modify(~ {
@@ -88,12 +83,12 @@ samples_flagged <- samples_interp %>%
     s
   }) %>%
   ungroup()
-
+#保守的な瞬目期間をNAに置き換えた列を作成
 samples_na <- samples_flagged %>%
   mutate(
     pupil_for_interp = if_else(blink_window, NA_real_, pupil)
   )
-
+#トライアルごとに補完。その際、視点座標も補完する。
 samples_interp_final <- samples_na %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
@@ -119,10 +114,10 @@ samples_interp_final <- samples_na %>%
     )
   ) %>%
   ungroup()
-
+#年のためNAがないかチェック
 samples_interp_final <- samples_interp_final%>%
 filter(!is.na(pupil_interp)) 
-
+#変化速度を求めるため、時間ごとの座標の変化量を求める
 analysis_data <- samples_interp_final %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
@@ -130,16 +125,16 @@ analysis_data <- samples_interp_final %>%
     pupil_diff = pupil_interp - lag(pupil_interp)
   ) %>%
   ungroup()
-  
+#平均変化速度  
 pupil_velocity_average = mean(analysis_data$pupil_diff,na.rm=TRUE)
-
+#SDと定数の定義
 SD = sd(analysis_data$pupil_diff,na.rm = TRUE)
 σ = 1.5
-
+#閾値の定義
 low_threshold = pupil_velocity_average - SD*σ
 high_threshold = pupil_velocity_average + SD*σ
 
-
+#閾値を外れる値を検出、箇所の同定
 raw_artifacts <- which(analysis_data$pupil_diff<low_threshold | analysis_data$pupil_diff>high_threshold)
 a <- diff(raw_artifacts)
 artifacts_point <- sort(unique(c(raw_artifacts,raw_artifacts)))
@@ -311,25 +306,88 @@ final_dat <- second_dat %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
   mutate(
-    Pupil_final = na.approx(
+    pupil_final = na.approx(
        pupil_for_interp_second,
       x = time_rel,
       na.rm = FALSE
     )
   ) %>%
   ungroup()
+##ここで前処理終わり
 
+final_dat <- final_dat %>%
+  arrange(trial, time_rel) %>%
+  group_by(trial) %>%
+  mutate(
+    trial_row = row_number(),
+    n_trial = n(),
+    last_2500 = trial_row > n_trial - 2500
+  ) %>%
+  ungroup()
 
+last_trial <- max(final_dat$trial, na.rm = TRUE)
+
+mw_dat <- final_dat %>%
+  filter(
+    last_2500 == TRUE,
+    trial != last_trial
+  ) %>%
+  dplyr::select(
+    trial,
+    time_rel,
+    x = vx,
+    y = vy,
+    pupil = pupil_final
+  ) 
+
+mw_dat <- mw_dat %>%
+  arrange(trial, time_rel) %>%
+  group_by(trial) %>%
+  mutate(
+    trial_end_time = last(time_rel),
+    time= (time_rel - trial_end_time) / 1000
+  ) %>%
+  ungroup()
+
+pupil_mean_by_time <- mw_dat %>%
+  group_by(time) %>%
+  summarise(
+    mean_pupil = mean(pupil, na.rm = TRUE),
+    sd_pupil = sd(pupil, na.rm = TRUE),
+    n_trial = n_distinct(trial),
+    .groups = "drop"
+  )
 
 library(ggplot2)
 library(tidyverse)
 library(patchwork)
 
-dat<-second_dat
+dat<-final_dat
 
-gorgx<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=xv), color='red')
+ggplot(
+  data = mw_dat,
+  aes(x = time, y = pupil)
+) +
+  geom_line() +
+  facet_wrap(~ trial, scales = "free_x") +
+  labs(
+    x = "Time",
+    y = "Pupil",
+    title = "MW"
+  ) +
+  theme_bw()
+
+ggplot(pupil_mean_by_time, aes(x = time, y = mean_pupil)) +
+  geom_line() +
+  labs(
+    x = "Time (s)",
+    y = "Mean pupil"
+  ) +
+  theme_bw()
+
+gorgx<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=vx), color='red')
 gorgx<-gorgx+ylim(-(blink_raw$display_coords[3]/2), (blink_raw$display_coords[3]/2))
-gorgy<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=yv), color='blue')
+gorgy<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=vy), color='blue')
 gorgy<-gorgy+ylim(-(blink_raw$display_coords[4]/2), (blink_raw$display_coords[4]/2))
 gppl<-ggplot(data=dat)+geom_line(aes(x=time_rel, y=pupil_interp2), color='green')
 
@@ -361,3 +419,8 @@ for (i in 1:nrow(events)){
   dev.off()
 }
 
+
+
+## EMG分析
+emg_dat <- read.csv('arie_emg_20260623_150047.csv')
+plot(emg_dat$EMG,emg_dat$EMG_Time_s)
