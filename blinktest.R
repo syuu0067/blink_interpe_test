@@ -6,12 +6,19 @@ library(eyelinkReader)
 library(dplyr)
 library(zoo)
 #データの読み込み
+
+subject <- "s201"
+
+read_edf_file <- paste(subject,"mw.edf",sep ="")
+
 blink_raw <- read_edf(
-  "ariemw.edf",
+  read_edf_file,
   import_samples = TRUE,
   start_marker = "REFOCUS",
   end_marker = "MW_REPORT"
 )
+
+# 下処理 ---------------------------------------------------------------------
 #必要データのみの抜粋
 samples <- blink_raw$samples %>%
   dplyr::select(
@@ -23,10 +30,11 @@ samples <- blink_raw$samples %>%
     y = gyR,
     pupil = paR
   ) %>%
-  dplyr::mutate(
-    trial = as.integer(trial)
-  ) %>%
+dplyr::mutate(
+  trial = as.integer(trial)
+) %>%
   dplyr::filter(trial %% 2 == 1)
+
 #サンプリングレート及び、画面サイズ
 sr=250
 screen_center_x <- 1920 / 2  
@@ -315,13 +323,17 @@ final_dat <- second_dat %>%
   ungroup()
 ##ここで前処理終わり
 
+# エポックの抜き出し ---------------------------------------------------------------
+
+
 final_dat <- final_dat %>%
   arrange(trial, time_rel) %>%
   group_by(trial) %>%
   mutate(
     trial_row = row_number(),
     n_trial = n(),
-    last_2500 = trial_row > n_trial - 2500
+    last_2500 = trial_row > n_trial - 2500,
+    first_2500 = trial_row <= 2500
   ) %>%
   ungroup()
 
@@ -337,7 +349,8 @@ mw_dat <- final_dat %>%
     time_rel,
     x = vx,
     y = vy,
-    pupil = pupil_final
+    pupil = pupil_final,
+    for_blink_duration = pupil_for_interp_second
   ) 
 
 mw_dat <- mw_dat %>%
@@ -347,9 +360,45 @@ mw_dat <- mw_dat %>%
     trial_end_time = last(time_rel),
     time= (time_rel - trial_end_time) / 1000
   ) %>%
+  slice(1:(n()-250))%>%
+  ungroup()
+ 
+
+mw_mean_by_time <- mw_dat %>%
+  group_by(time) %>%
+  summarise(
+    mean_pupil = mean(pupil, na.rm = TRUE),
+    sd_pupil = sd(pupil, na.rm = TRUE),
+    n_trial = n_distinct(trial),
+    .groups = "drop"
+  )
+  
+
+rf_dat <- final_dat %>%
+  filter(
+    first_2500 == TRUE,
+    trial != 1
+  ) %>%
+  dplyr::select(
+    trial,
+    time_rel,
+    x = vx,
+    y = vy,
+    pupil = pupil_final,
+    for_blink_duration = pupil_for_interp_second
+  ) 
+
+rf_dat <- rf_dat %>%
+  arrange(trial, time_rel) %>%
+  group_by(trial) %>%
+  mutate(
+    trial_first_time = first(time_rel),
+    time= (time_rel - trial_first_time) / 1000,
+  ) %>%
+  slice(251:n())%>%
   ungroup()
 
-pupil_mean_by_time <- mw_dat %>%
+rf_mean_by_time <- rf_dat %>%
   group_by(time) %>%
   summarise(
     mean_pupil = mean(pupil, na.rm = TRUE),
@@ -358,33 +407,89 @@ pupil_mean_by_time <- mw_dat %>%
     .groups = "drop"
   )
 
-library(ggplot2)
-library(tidyverse)
-library(patchwork)
+y_range <- range(
+  c(mw_dat$pupil,
+    rf_dat$pupil),
+  na.rm = TRUE
+)
 
-dat<-final_dat
+mw_dat <- mw_dat %>%
+  arrange(trial, time_rel) %>%
+  mutate(
+    trial = dense_rank(trial)
+    )
 
-ggplot(
-  data = mw_dat,
-  aes(x = time, y = pupil)
-) +
-  geom_line() +
-  facet_wrap(~ trial, scales = "free_x") +
-  labs(
-    x = "Time",
-    y = "Pupil",
-    title = "MW"
-  ) +
-  theme_bw()
+rf_dat <- rf_dat %>%
+  arrange(trial, time_rel) %>%
+  mutate(
+    trial = dense_rank(trial)
+  )
 
-ggplot(pupil_mean_by_time, aes(x = time, y = mean_pupil)) +
-  geom_line() +
-  labs(
-    x = "Time (s)",
-    y = "Mean pupil"
-  ) +
-  theme_bw()
+write.csv(mw_dat,paste(subject,"_mw_dat.csv", sep = ""),row.names = FALSE)
+write.csv(rf_dat,paste(subject,"_rf_dat.csv", sep = ""),row.names = FALSE)
+          
 
+ library(ggplot2)
+ library(tidyverse)
+ library(patchwork)
+
+ dat<-final_dat
+
+ {mw_plot <- ggplot(
+   data = mw_dat,
+   aes(x = time, y = pupil)
+ ) +
+   geom_line() +
+   coord_cartesian(ylim = y_range) +
+   facet_wrap(~ trial, scales = "free_x") +
+   labs(
+     x = "Time",
+     y = "Pupil",
+     title = "MW"
+   ) +
+   theme_bw()
+
+ RF_plot <- ggplot(
+   data = rf_dat,
+   aes(x = time, y = pupil)
+ ) +
+   geom_line() +
+   coord_cartesian(ylim = y_range) +
+   facet_wrap(~ trial, scales = "free_x") +
+   labs(
+     x = "Time",
+     y = "Pupil",
+     title = "RF"
+   ) +
+   theme_bw()
+
+ RF_plot + mw_plot}
+
+ {MW_mean <- ggplot(mw_mean_by_time, aes(x = time, y = mean_pupil)) +
+   geom_line() +
+   coord_cartesian(ylim = y_range) +
+   labs(
+     x = "Time (s)",
+     y = "Mean pupil",
+     title = "MW_mean"
+   ) +
+   theme_bw()
+
+ RF_mean <- ggplot(rf_mean_by_time, aes(x = time, y = mean_pupil,)) +
+   geom_line() +
+   coord_cartesian(ylim = y_range) +
+   labs(
+     x = "Time (s)",
+     y = "Mean pupil",
+     title = "RF_mean"
+   ) +
+   theme_bw()
+
+ RF_mean + MW_mean}
+
+
+
+#前処理確認のためのグラフ。実記録のデータ数でやるとパソコンがフリーズするので実行しないこと
 gorgx<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=vx), color='red')
 gorgx<-gorgx+ylim(-(blink_raw$display_coords[3]/2), (blink_raw$display_coords[3]/2))
 gorgy<-ggplot(data=dat)+geom_line( aes(x=time_rel, y=vy), color='blue')
@@ -393,34 +498,31 @@ gppl<-ggplot(data=dat)+geom_line(aes(x=time_rel, y=pupil_interp2), color='green'
 
 gorgx / gorgy / gppl
 
-tmpwid<-100
-tblink<-1
-prd<-(blink_raw$blinks$sttime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)-tmpwid):(blink_raw$blinks$entime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)+tmpwid)
-plot(prd,dat$pupil_second[prd])
+# tmpwid<-100
+# tblink<-1
+# prd<-(blink_raw$blinks$sttime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)-tmpwid):(blink_raw$blinks$entime_rel[tblink]/(1000/blink_raw$headers$rec_sample_rate)+tmpwid)
+# plot(prd,dat$pupil_second[prd])
+# 
+# onsets<-events$onset*(1000/sr)
+# offsets<-events$offset*(1000/sr)
+# outdir <- "plot_dat"
+# for (i in 1:nrow(events)){
+#   nms<-i
+#   prd1<-(events$onset[nms]-tmpwid):(events$offset[nms]+tmpwid)
+#   prd2<-(events$onset[nms]):(events$offset[nms])
+#   xx<-c(events$onset[nms]-tmpwid, events$offset[nms]+tmpwid)
+#   yy<-c(min(dat$pupil_second[prd1],na.rm = T), max(dat$pupil_second[prd1],na.rm=T))
+#   png(
+#     filename = file.path(outdir, paste0("microsaccade_", i, ".png")),
+#     width = 800,
+#     height = 600
+#   )
+#   plot(prd1, dat$pupil_second[prd1], xlim=xx, ylim=yy)
+#   par (new =T)
+#   plot(prd2, dat$pupil_second[prd2], col='red', xlim=xx, ylim=yy)
+#   res[nms,]
+#   dev.off()
+# }
 
-onsets<-events$onset*(1000/sr)
-offsets<-events$offset*(1000/sr)
-outdir <- "plot_dat"
-for (i in 1:nrow(events)){
-  nms<-i
-  prd1<-(events$onset[nms]-tmpwid):(events$offset[nms]+tmpwid)
-  prd2<-(events$onset[nms]):(events$offset[nms])
-  xx<-c(events$onset[nms]-tmpwid, events$offset[nms]+tmpwid)
-  yy<-c(min(dat$pupil_second[prd1],na.rm = T), max(dat$pupil_second[prd1],na.rm=T))
-  png(
-    filename = file.path(outdir, paste0("microsaccade_", i, ".png")),
-    width = 800,
-    height = 600
-  )
-  plot(prd1, dat$pupil_second[prd1], xlim=xx, ylim=yy)
-  par (new =T)
-  plot(prd2, dat$pupil_second[prd2], col='red', xlim=xx, ylim=yy)
-  res[nms,]
-  dev.off()
-}
 
 
-
-## EMG分析
-emg_dat <- read.csv('arie_emg_20260623_150047.csv')
-plot(emg_dat$EMG,emg_dat$EMG_Time_s)
